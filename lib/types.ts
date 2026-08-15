@@ -6,6 +6,19 @@ export interface Actor {
   popularity: number;
 }
 
+export interface ActorSuggestion {
+  id: number;
+  name: string;
+  profile_path: string | null;
+  known_for_department: string;
+}
+
+export interface ActorDetails {
+  id: number;
+  name: string;
+  profile_path: string | null;
+}
+
 export interface MovieCredit {
   id: number;
   title: string;
@@ -24,4 +37,9 @@ export interface Movie {
   character: string;
   imdbRating: number;
   imdbVotes: string;
+}
+
+export interface ActorPageData {
+  actor: ActorDetails;
+  movies: Movie[];
 }

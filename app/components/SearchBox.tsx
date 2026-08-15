@@ -1,62 +1,109 @@
 "use client";
 
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import {
+  actorQueryOptions,
+  actorSearchQueryKey,
+  actorSearchQueryOptions,
+  normalizeActorQuery,
+} from "@/lib/queries";
+import {
+  clearRecentActors,
+  readRecentActors,
+  saveRecentActor,
+} from "@/lib/search-history";
+import type { ActorSuggestion } from "@/lib/types";
 import ActorDropdown from "./ActorDropdown";
-
-interface ActorSuggestion {
-  id: number;
-  name: string;
-  profile_path: string | null;
-  known_for_department: string;
-}
+import RecentActors from "./RecentActors";
 
 export default function SearchBox() {
   const [query, setQuery] = useState("");
-  const [suggestions, setSuggestions] = useState<ActorSuggestion[]>([]);
+  const [debouncedQuery, setDebouncedQuery] = useState("");
   const [isOpen, setIsOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(-1);
-  const [isLoading, setIsLoading] = useState(false);
-  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [recentActors, setRecentActors] = useState<ActorSuggestion[]>([]);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const blurRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const router = useRouter();
+  const queryClient = useQueryClient();
+  const normalizedQuery = normalizeActorQuery(query);
+  const hasValidQuery = normalizedQuery.length >= 2;
 
-  const fetchSuggestions = useCallback(async (q: string) => {
-    if (q.trim().length < 2) {
-      setSuggestions([]);
-      setIsOpen(false);
+  useEffect(() => {
+    if (!hasValidQuery) {
+      setDebouncedQuery("");
       return;
     }
-    setIsLoading(true);
-    try {
-      const res = await fetch(`/api/search?q=${encodeURIComponent(q.trim())}`);
-      if (res.ok) {
-        const data: ActorSuggestion[] = await res.json();
-        setSuggestions(data);
-        setIsOpen(data.length > 0);
-        setActiveIndex(-1);
-      }
-    } finally {
-      setIsLoading(false);
+
+    const cached = queryClient.getQueryData<ActorSuggestion[]>(
+      actorSearchQueryKey(normalizedQuery),
+    );
+    if (cached !== undefined) {
+      setDebouncedQuery(normalizedQuery);
+      return;
     }
-  }, []);
+
+    const timeout = setTimeout(() => setDebouncedQuery(normalizedQuery), 300);
+    return () => clearTimeout(timeout);
+  }, [hasValidQuery, normalizedQuery, queryClient]);
+
+  const searchQuery = useQuery({
+    ...actorSearchQueryOptions(debouncedQuery),
+    enabled: debouncedQuery.length >= 2,
+  });
+
+  const immediateCachedSuggestions = hasValidQuery
+    ? queryClient.getQueryData<ActorSuggestion[]>(
+        actorSearchQueryKey(normalizedQuery),
+      )
+    : undefined;
+  const isCurrentQuery = normalizedQuery === debouncedQuery;
+  const suggestions =
+    immediateCachedSuggestions ??
+    (isCurrentQuery ? (searchQuery.data ?? []) : []);
+  const isWaitingForDebounce =
+    hasValidQuery &&
+    !isCurrentQuery &&
+    immediateCachedSuggestions === undefined;
+  const isLoading =
+    isWaitingForDebounce ||
+    (isCurrentQuery && (searchQuery.isPending || searchQuery.isFetching));
+  const isError =
+    isCurrentQuery && searchQuery.isError && suggestions.length === 0;
+  const isEmpty =
+    isCurrentQuery &&
+    searchQuery.isSuccess &&
+    !searchQuery.isFetching &&
+    suggestions.length === 0;
+  const isDropdownVisible =
+    isOpen &&
+    hasValidQuery &&
+    (isLoading || isError || isEmpty || suggestions.length > 0);
 
   function handleChange(e: React.ChangeEvent<HTMLInputElement>) {
     const value = e.target.value;
     setQuery(value);
-
-    if (debounceRef.current) clearTimeout(debounceRef.current);
-    debounceRef.current = setTimeout(() => fetchSuggestions(value), 300);
+    setActiveIndex(-1);
+    setIsOpen(value.trim().length >= 2);
   }
 
   function handleSelect(actor: ActorSuggestion) {
     setQuery(actor.name);
     setIsOpen(false);
-    setSuggestions([]);
+    setRecentActors(saveRecentActor(actor));
+    void queryClient.prefetchQuery(actorQueryOptions(actor.id));
     router.push(`/actor/${actor.id}?name=${encodeURIComponent(actor.name)}`);
   }
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
-    if (!isOpen) return;
+    if (e.key === "Escape") {
+      setIsOpen(false);
+      return;
+    }
+
+    if (!isDropdownVisible || suggestions.length === 0) return;
 
     if (e.key === "ArrowDown") {
       e.preventDefault();
@@ -67,15 +114,15 @@ export default function SearchBox() {
     } else if (e.key === "Enter" && activeIndex >= 0) {
       e.preventDefault();
       handleSelect(suggestions[activeIndex]);
-    } else if (e.key === "Escape") {
-      setIsOpen(false);
     }
   }
 
-  // Clean up debounce on unmount
   useEffect(() => {
+    setRecentActors(readRecentActors());
+    inputRef.current?.focus();
+
     return () => {
-      if (debounceRef.current) clearTimeout(debounceRef.current);
+      if (blurRef.current) clearTimeout(blurRef.current);
     };
   }, []);
 
@@ -103,19 +150,27 @@ export default function SearchBox() {
           </svg>
         </span>
         <input
+          ref={inputRef}
           id="actor-search"
           type="search"
           role="combobox"
           aria-autocomplete="list"
-          aria-expanded={isOpen}
-          aria-controls="actor-suggestions"
+          aria-expanded={isDropdownVisible}
+          aria-controls={isDropdownVisible ? "actor-suggestions" : undefined}
+          aria-activedescendant={
+            activeIndex >= 0 && suggestions[activeIndex]
+              ? `actor-suggestion-${suggestions[activeIndex]?.id}`
+              : undefined
+          }
           autoComplete="off"
           spellCheck={false}
           value={query}
           onChange={handleChange}
           onKeyDown={handleKeyDown}
-          onBlur={() => setTimeout(() => setIsOpen(false), 150)}
-          onFocus={() => suggestions.length > 0 && setIsOpen(true)}
+          onBlur={() => {
+            blurRef.current = setTimeout(() => setIsOpen(false), 150);
+          }}
+          onFocus={() => hasValidQuery && setIsOpen(true)}
           placeholder="Search for an actor..."
           className="w-full pl-11 pr-4 py-3.5 rounded-2xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-50 placeholder:text-zinc-400 shadow-sm focus:outline-none focus:ring-2 focus:ring-zinc-900 dark:focus:ring-zinc-400 text-base transition"
         />
@@ -145,13 +200,22 @@ export default function SearchBox() {
           </span>
         )}
       </div>
-      {isOpen && (
+      {isDropdownVisible && (
         <ActorDropdown
           suggestions={suggestions}
           onSelect={handleSelect}
           activeIndex={activeIndex}
+          isLoading={isLoading}
+          isError={isError}
+          isEmpty={isEmpty}
+          onRetry={() => searchQuery.refetch()}
         />
       )}
+      <RecentActors
+        actors={recentActors}
+        onSelect={handleSelect}
+        onClear={() => setRecentActors(clearRecentActors())}
+      />
     </div>
   );
 }
